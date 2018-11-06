@@ -1,6 +1,7 @@
 package io.keyss.superadmin;
 
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.support.annotation.NonNull;
 import android.support.v7.app.AppCompatActivity;
 import android.support.v7.widget.DefaultItemAnimator;
@@ -43,11 +44,12 @@ public class MainActivity extends AppCompatActivity {
     private String[] cmds = {"robot_body_advance", "robot_body_retreat", "robot_body_left", "robot_body_right",
             "robot_head_left", "robot_head_right", "robot_body_stop", "_robot_check"};
     private boolean isReceive;
-    private long resendTime = 100;
     private DatagramPacket mReceivePacket;
     private DatagramSocket mReceiveSocket;
     private Runnable mInsertRunnable;
     private ReceiveAdapter receiveAdapter;
+    private SendRunnable mSendRunnable;
+    private int defaultDelayTime = 300;
 
 
     private void fbc() {
@@ -113,35 +115,10 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onClick(View view) {
                 if (!TextUtils.isEmpty(getCmd())) {
-                    executorService.execute(new Runnable() {
-                        @Override
-                        public void run() {
-                            InetSocketAddress address = new InetSocketAddress(getIp(), getPort());
-                            DatagramSocket socket = null;
-                            try {
-                                socket = new DatagramSocket(null);
-                                socket.setReuseAddress(true);
-                                socket.bind(new InetSocketAddress(getPort()));
-
-                                String cmd = getCmd();
-                                byte[] cmdBytes = cmd.getBytes();
-                                socket.send(new DatagramPacket(cmdBytes, cmdBytes.length, address));
-
-                                if (mReceiveDate.add("发  时间: " + System.currentTimeMillis() + "\n消息: " + cmd)) {
-                                    InsertItem();
-                                }
-                            } catch (IOException e) {
-                                e.printStackTrace();
-                            } finally {
-                                if (null != socket) {
-                                    if (!socket.isClosed()) {
-                                        socket.close();
-                                    }
-                                    socket.disconnect();
-                                }
-                            }
-                        }
-                    });
+                    if (null == mSendRunnable) {
+                        mSendRunnable = new SendRunnable();
+                    }
+                    executorService.execute(mSendRunnable);
                 } else {
                     Toast.makeText(MainActivity.this, "消息不可以为空", Toast.LENGTH_SHORT).show();
                 }
@@ -166,11 +143,47 @@ public class MainActivity extends AppCompatActivity {
 
     private int getPort() {
         try {
-            return Integer.valueOf(et_port.getText().toString().trim());
+            Integer port = Integer.valueOf(et_port.getText().toString().trim());
+            if (port > 65535) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        et_port.setText("9999");
+                        Toast.makeText(MainActivity.this, "端口不能大于65535", Toast.LENGTH_SHORT).show();
+                    }
+                });
+                return 9999;
+            } else {
+                return port;
+            }
         } catch (NumberFormatException e) {
             e.printStackTrace();
-            Toast.makeText(this, "端口错误", Toast.LENGTH_SHORT).show();
-            return -1;
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    et_port.setText("9999");
+                    Toast.makeText(MainActivity.this, "端口错误", Toast.LENGTH_SHORT).show();
+                }
+            });
+            return 9999;
+        }
+    }
+
+    private int getDelayTime() {
+        try {
+            return Integer.valueOf(et_time.getText().toString().trim());
+        } catch (NumberFormatException e) {
+            e.printStackTrace();
+            if (mReceiveDate.add("时间格式错误，自动设为300ms")) {
+                InsertItem();
+            }
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    cb_auto_send.setChecked(false);
+                }
+            });
+            return defaultDelayTime;
         }
     }
 
@@ -182,6 +195,20 @@ public class MainActivity extends AppCompatActivity {
         return auto_tv_cmd.getText().toString().trim();
     }
 
+
+    private void sendCmd(InetSocketAddress address, DatagramSocket socket) throws IOException {
+        String cmd = getCmd();
+        byte[] cmdBytes = cmd.getBytes();
+        socket.send(new DatagramPacket(cmdBytes, cmdBytes.length, address));
+        if (mReceiveDate.add("发  时间: " + System.currentTimeMillis() + "\n消息: " + cmd)) {
+            InsertItem();
+        }
+        if (cb_auto_send.isChecked()) {
+            SystemClock.sleep(getDelayTime());
+            sendCmd(address, socket);
+        }
+    }
+
     private void closeReceiveDate() {
         if (null != mReceiveSocket) {
             if (!mReceiveSocket.isClosed()) {
@@ -189,6 +216,30 @@ public class MainActivity extends AppCompatActivity {
             }
             mReceiveSocket.disconnect();
             mReceiveSocket = null;
+        }
+    }
+
+    class SendRunnable implements Runnable {
+        @Override
+        public void run() {
+            InetSocketAddress address = new InetSocketAddress(getIp(), getPort());
+            DatagramSocket socket = null;
+            try {
+                socket = new DatagramSocket(null);
+                socket.setReuseAddress(true);
+                socket.bind(new InetSocketAddress(getPort()));
+
+                sendCmd(address, socket);
+            } catch (IOException e) {
+                e.printStackTrace();
+            } finally {
+                if (null != socket) {
+                    if (!socket.isClosed()) {
+                        socket.close();
+                    }
+                    socket.disconnect();
+                }
+            }
         }
     }
 
