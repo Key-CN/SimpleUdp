@@ -9,6 +9,7 @@ import android.support.v7.widget.DividerItemDecoration;
 import android.support.v7.widget.LinearLayoutManager;
 import android.support.v7.widget.RecyclerView;
 import android.text.TextUtils;
+import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
@@ -16,14 +17,21 @@ import android.widget.AutoCompleteTextView;
 import android.widget.CheckBox;
 import android.widget.CompoundButton;
 import android.widget.EditText;
+import android.widget.RadioGroup;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.PrintWriter;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.util.ArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -37,19 +45,25 @@ public class MainActivity extends AppCompatActivity {
     private RecyclerView rv_receive;
     private Switch switch_monitor;
     private CheckBox cb_auto_send;
+    private RadioGroup rg_mode;
 
 
     private ArrayList<String> mReceiveDate = new ArrayList<>();
     private ExecutorService executorService;
     private String[] cmds = {"robot_body_advance", "robot_body_retreat", "robot_body_left", "robot_body_right",
-            "robot_head_left", "robot_head_right", "robot_body_stop", "_robot_check"};
+            "robot_head_left", "robot_head_right", "robot_body_stop", "_robot_check",
+            "robot_si", "robot_sm", "robot_se", "robot_sd", "robot_ipc_adjust",
+            "robot_sleep_on", "robot_sleep_off"};
     private boolean isReceive;
     private DatagramPacket mReceivePacket;
     private DatagramSocket mReceiveSocket;
     private Runnable mInsertRunnable;
     private ReceiveAdapter receiveAdapter;
-    private SendRunnable mSendRunnable;
-    private int defaultDelayTime = 300;
+    private SendUdpRunnable mSendUdpRunnable;
+    private SendTcpRunnable mSendTcpRunnable;
+    private static final int DEFAULT_DELAY_TIME = 300;
+    private static final int MODE_UDP = 1;
+    private static final int MODE_TCP = 2;
 
 
     private void fbc() {
@@ -60,6 +74,7 @@ public class MainActivity extends AppCompatActivity {
         cb_auto_send = findViewById(R.id.cb_auto_send);
         switch_monitor = findViewById(R.id.switch_monitor);
         rv_receive = findViewById(R.id.rv_receive);
+        rg_mode = findViewById(R.id.rg_mode);
     }
 
     @Override
@@ -72,12 +87,32 @@ public class MainActivity extends AppCompatActivity {
         switch_monitor.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(CompoundButton compoundButton, boolean b) {
+                rg_mode.setEnabled(isReceive);
                 if (isReceive = b) {
-                    executorService.execute(new ReceiveRunnable());
+                    switch (getMode()) {
+                        case MODE_UDP:
+                            executorService.execute(new ReceiveUdpRunnable());
+                            break;
+                        case MODE_TCP:
+                            executorService.execute(new ReceiveTcpRunnable());
+                            break;
+                        default:
+                            Toast.makeText(MainActivity.this, "模式错误", Toast.LENGTH_SHORT).show();
+                            break;
+                    }
                 } else {
-                    closeReceiveDate();
-                }
+                    switch (getMode()) {
+                        case MODE_UDP:
+                            closeUdpReceiveDate();
+                            break;
+                        case MODE_TCP:
 
+                            break;
+                        default:
+                            Toast.makeText(MainActivity.this, "模式错误", Toast.LENGTH_SHORT).show();
+                            break;
+                    }
+                }
             }
         });
 
@@ -115,10 +150,22 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onClick(View view) {
                 if (!TextUtils.isEmpty(getCmd())) {
-                    if (null == mSendRunnable) {
-                        mSendRunnable = new SendRunnable();
+                    switch (getMode()) {
+                        case MODE_UDP:
+                            if (null == mSendUdpRunnable) {
+                                mSendUdpRunnable = new SendUdpRunnable();
+                            }
+                            executorService.execute(mSendUdpRunnable);
+                            break;
+                        case MODE_TCP:
+                            if (null == mSendTcpRunnable) {
+                                mSendTcpRunnable = new SendTcpRunnable();
+                            }
+                            executorService.execute(mSendTcpRunnable);
+                            break;
+                        default:
+                            break;
                     }
-                    executorService.execute(mSendRunnable);
                 } else {
                     Toast.makeText(MainActivity.this, "消息不可以为空", Toast.LENGTH_SHORT).show();
                 }
@@ -127,6 +174,16 @@ public class MainActivity extends AppCompatActivity {
 
     }
 
+    private int getMode() {
+        switch (rg_mode.getCheckedRadioButtonId()) {
+            case R.id.rb_udp:
+                return MODE_UDP;
+            case R.id.rb_tcp:
+                return MODE_TCP;
+            default:
+                return 0;
+        }
+    }
 
     private void InsertItem() {
         if (null == mInsertRunnable) {
@@ -183,7 +240,7 @@ public class MainActivity extends AppCompatActivity {
                     cb_auto_send.setChecked(false);
                 }
             });
-            return defaultDelayTime;
+            return DEFAULT_DELAY_TIME;
         }
     }
 
@@ -194,7 +251,6 @@ public class MainActivity extends AppCompatActivity {
     private String getCmd() {
         return auto_tv_cmd.getText().toString().trim();
     }
-
 
     private void sendCmd(InetSocketAddress address, DatagramSocket socket) throws IOException {
         String cmd = getCmd();
@@ -209,7 +265,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void closeReceiveDate() {
+    private void closeUdpReceiveDate() {
         if (null != mReceiveSocket) {
             if (!mReceiveSocket.isClosed()) {
                 mReceiveSocket.close();
@@ -219,7 +275,64 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    class SendRunnable implements Runnable {
+    class SendTcpRunnable implements Runnable {
+
+        @Override
+        public void run() {
+            try {
+                Socket s = new Socket(getIp(), getPort());
+                // outgoing stream redirect to socket
+                OutputStream out = s.getOutputStream();
+                // 注意第二个参数据为true将会自动flush，否则需要需要手动操作out.flush()
+                PrintWriter output = new PrintWriter(out, true);
+                output.println(getCmd());
+                BufferedReader input = new BufferedReader(new InputStreamReader(s.getInputStream()));
+                // read line(s)
+                String message = input.readLine();
+                Log.e("Tcp Demo", "message From Server:" + message);
+                s.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    class ReceiveTcpRunnable implements Runnable {
+
+        @Override
+        public void run() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(MainActivity.this, "开始监听" + getPort() + "端口TCP", Toast.LENGTH_SHORT).show();
+                }
+            });
+            try {
+                Boolean endFlag = false;
+                ServerSocket ss = new ServerSocket(getPort());
+                while (!endFlag) {
+                    // 等待客户端连接
+                    Socket s = ss.accept();
+                    BufferedReader input = new BufferedReader(new InputStreamReader(s.getInputStream()));
+                    //注意第二个参数据为true将会自动flush，否则需要需要手动操作output.flush()
+                    PrintWriter output = new PrintWriter(s.getOutputStream(), true);
+                    String message = input.readLine();
+                    Log.e("Tcp Demo", "message from Client:" + message);
+                    output.println("message received!");
+                    //output.flush();
+                    if ("shutDown".equals(message)) {
+                        endFlag = true;
+                    }
+                    s.close();
+                }
+                ss.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    class SendUdpRunnable implements Runnable {
         @Override
         public void run() {
             InetSocketAddress address = new InetSocketAddress(getIp(), getPort());
@@ -243,11 +356,11 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    class ReceiveRunnable implements Runnable {
+    class ReceiveUdpRunnable implements Runnable {
         @Override
         public void run() {
             while (isReceive) {
-                closeReceiveDate();
+                closeUdpReceiveDate();
                 try {
                     mReceiveSocket = new DatagramSocket(null);
                     mReceiveSocket.setReuseAddress(true);
@@ -260,7 +373,7 @@ public class MainActivity extends AppCompatActivity {
                 } catch (IOException e) {
                     e.printStackTrace();
                 } finally {
-                    closeReceiveDate();
+                    closeUdpReceiveDate();
                 }
             }
         }
